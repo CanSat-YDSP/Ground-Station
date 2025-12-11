@@ -14,20 +14,48 @@ class SerialReader:
         self.ser = serial.Serial(port, baudrate, timeout=timeout)
 
     def read_line(self):
+        # Attempt to read a framed packet of the form:
+        # 0xFF | length (1 byte) | payload (length-1 bytes) | checksum (1 byte)
+        # Use explicit reads instead of readline() to avoid double-reading parts of the frame.
         if self.ser.in_waiting > 0:
-            # also check if line starts with 0xFF and ends with 0x0A
-            line = self.ser.readline()
-            if line.startswith(b'\xFF') and line.endswith(b'\x0A'):
-                return line  # strip start, length, checksum, and end
+            # read header byte
+            header = self.ser.read(1)
+            if not header:
+                return None
+            if header != b'\xFF':
+                return None
+
+            # read length byte
+            length_byte = self.ser.read(1)
+            if not length_byte:
+                return None
+            length = length_byte[0]
+
+            # length must include payload + checksum (so must be at least 1 for checksum)
+            if length < 1:
+                return None
+
+            # read the advertised number of bytes (payload + checksum)
+            data_with_checksum = self.ser.read(length)
+
+            # if we didn't get enough bytes, abandon this frame
+            if len(data_with_checksum) != length:
+                return None
+
+            payload = data_with_checksum[:-1]
+            recv_checksum = data_with_checksum[-1]
+
+            if self.calculate_xor_checksum(payload) == recv_checksum:
+                return payload
         return None
 
     def write_line(self, data: bytes):
+        # Write a framed packet to the serial port, with xFF header, length, data then checksum
         self.ser.write(b'\xFF')
         no_bytes = len(data)
         self.ser.write(bytes([no_bytes]))
         self.ser.write(data)
         self.ser.write(bytes([self.calculate_xor_checksum(data)]))
-        self.ser.write(b'\x0A')
 
     def calculate_xor_checksum(self, data: bytes) -> int:
         checksum = 0
@@ -38,7 +66,7 @@ class SerialReader:
     def close(self):
         self.ser.close()
 
-gs = SerialReader('COM10', 9600)
+gs = SerialReader('COM5', 9600)
 
 show_raw = True
 
@@ -101,6 +129,11 @@ def _(event):
             raw_output.text += "Entered simulation mode\n"
             decoded_output.text += "Entered simulation mode\n"
 
+        elif parts[0] == "calibrate_altitude":
+            gs.write_line(b'\x04')
+            raw_output.text += "Sent calibrate altitude command\n"
+            decoded_output.text += "Sent calibrate altitude command\n"
+
         elif parts[0] == "send-sim":
             async def send_simulation():
                 try:
@@ -144,14 +177,45 @@ def _(event):
                 raw_output.text += f"Error saving log: {e}\n"
                 decoded_output.text += f"Error saving log: {e}\n"
 
+        elif parts[0] == "save-altitude-log":
+            filename = parts[1] if len(parts) > 1 else "altitude_log.csv"
+            try:
+                with open(filename, "w", newline="") as f:
+                    f.write("timestamp,altitude_m\n")
+                    for entry in decoded_output.text.strip().split("\n\n"):
+                        if "Altitude:" in entry:
+                            lines = entry.split("\n")
+                            timestamp = datetime.now().isoformat()
+                            for line in lines:
+                                if line.startswith("Altitude:"):
+                                    altitude_str = line.split(":")[1].strip().split()[0]
+                                    f.write(f"{timestamp},{altitude_str}\n")
+                raw_output.text += f"Saved altitude log to {filename}\n"
+                decoded_output.text += f"Saved altitude log to {filename}\n"
+                raw_output.buffer.cursor_position = len(raw_output.text)
+                decoded_output.buffer.cursor_position = len(decoded_output.text)
+            except Exception as e:
+                raw_output.text += f"Error saving altitude log: {e}\n"
+                decoded_output.text += f"Error saving altitude log: {e}\n"
+        
+        elif parts[0] == "send-bin":
+            file_to_send = parts[1] if len(parts) > 1 else "binary.bin"
+            asyncio.create_task(send_binary_file(file_to_send))
+            raw_output.text += f"Started sending binary file {file_to_send}...\n"
+            decoded_output.text += f"Started sending binary file {file_to_send}...\n"
+            raw_output.buffer.cursor_position = len(raw_output.text)
+            decoded_output.buffer.cursor_position = len(decoded_output.text)
+
         elif parts[0] == "help":
             msg = (
                 "Available commands:\n"
                 " launch           - start launch\n"
                 " enter-sim        - enter simulation mode\n"
                 " send-sim         - send simulated pressure data\n"
+                " calibrate_altitude - calibrate altitude sensor\n"
                 " pressure <value> - send pressure float\n"
                 " save-log [file]  - save current raw output to CSV\n"
+                " save-altitude-log [file] - save altitude data to CSV\n"
                 " help             - show this message\n"
                 " exit             - quit\n"
             )
@@ -188,23 +252,65 @@ layout = Layout(
 
 modes = ["MODE_SIMULATION", "MODE_FLIGHT"]
 states = ["LAUNCH_PAD", "ASCENT", "DESCENT", "PROBE_RELEASE", "LANDED"]
+upload_statuses = ["NONE", "UPLOADING", "SUCCESS", "FAILURE"]
+command_codes = {
+    0x01: "LAUNCH",
+    0x02: "SET_PRESSURE",
+    0x03: "ENTER_SIMULATION",
+    0x04: "CALIBRATE_ALTITUDE",
+    0x05: "BINARY_DATA_PACKET",
+    0x06: "BINARY_DATA_END"
+}
 
 def decode_line(line: bytes) -> str:
-    packet_count = line[1]
-    mode = modes[line[2]]
-    state = states[line[3]]
+    packet_count = line[0]
+    mode = modes[line[1]]
+    state = states[line[2]]
+    command_code = line[51]
+    command = command_codes.get(command_code, "UNKNOWN_COMMAND")
+    upload_status = line[52]
     try:
-        altitude = struct.unpack('<f', line[4:8])[0]
-        pressure = struct.unpack('<f', line[8:12])[0]
+        altitude = struct.unpack('<f', line[3:7])[0]
+        pressure = struct.unpack('<f', line[7:11])[0]
+        temperature = struct.unpack('<f', line[11:15])[0]
+        # accel x y and z
+        accel_x = struct.unpack('<f', line[15:19])[0]
+        accel_y = struct.unpack('<f', line[19:23])[0]
+        accel_z = struct.unpack('<f', line[23:27])[0]
+        # mag x y and z
+        mag_x = struct.unpack('<f', line[27:31])[0]
+        mag_y = struct.unpack('<f', line[31:35])[0]
+        mag_z = struct.unpack('<f', line[35:39])[0]
+        # gyro x y and z
+        gyro_x = struct.unpack('<f', line[39:43])[0]
+        gyro_y = struct.unpack('<f', line[43:47])[0]
+        gyro_z = struct.unpack('<f', line[47:51])[0]
+
     except struct.error:
         altitude = 0.0
         pressure = 0.0
+        temperature = 0.0
+        accel_x = 0.0
+        accel_y = 0.0
+        accel_z = 0.0
+        mag_x = 0.0
+        mag_y = 0.0
+        mag_z = 0.0
+        gyro_x = 0.0
+        gyro_y = 0.0
+        gyro_z = 0.0
     decoded = (
         f"Packet Count: {packet_count} --------------------\n"
         f"Mode: {mode}\n"
         f"State: {state}\n"
         f"Altitude: {altitude:.2f} m\n"
         f"Pressure: {pressure:.2f} Pa\n"
+        f"Temperature: {temperature:.2f} °C"
+        f"\nAccelerometer: X={accel_x:.2f} m/s², Y={accel_y:.2f} m/s², Z={accel_z:.2f} m/s²"
+        f"\nMagnetometer: X={mag_x:.2f} µT, Y={mag_y:.2f} µT, Z={mag_z:.2f} µT"
+        f"\nGyroscope: X={gyro_x:.2f} °/s, Y={gyro_y:.2f} °/s, Z={gyro_z:.2f} °/s"
+        f"\nCommand Echo: {command_code} ({command})"
+        f"\nUpload Status: {upload_statuses[upload_status]}"
     )
     return decoded
 
@@ -222,6 +328,47 @@ async def refresh():
                 decoded_output.text += decode_line(line) + "\n\n"
                 decoded_output.buffer.cursor_position = len(decoded_output.text)
         await asyncio.sleep(0.05)
+
+async def send_binary_file(filename="binary.bin"):
+    try:
+        # Read entire binary file
+        with open(filename, "rb") as f:
+            data = f.read()
+        
+        if not data:
+            raw_output.text += f"File {filename} is empty.\n"
+            decoded_output.text += f"File {filename} is empty.\n"
+            return
+
+        # Calculate total checksum
+        total_checksum = gs.calculate_xor_checksum(data)
+
+        # Split into 64-byte chunks
+        chunk_size = 64
+        chunks = [data[i:i + chunk_size] for i in range(0, len(data), chunk_size)]
+
+        # Send each chunk
+        for i, chunk in enumerate(chunks):
+            packet_command = b'\x05'  # default command for all but last
+            # If it's the last chunk, append checksum and change command
+            if i == len(chunks) - 1:
+                packet_command = b'\x06'
+                chunk = chunk + bytes([total_checksum])
+            
+            gs.write_line(packet_command + chunk)
+            raw_output.text += f"Sent packet {i + 1}/{len(chunks)} ({len(chunk)} bytes)\n"
+            decoded_output.text += f"Sent packet {i + 1}/{len(chunks)} ({len(chunk)} bytes)\n"
+            raw_output.buffer.cursor_position = len(raw_output.text)
+            decoded_output.buffer.cursor_position = len(decoded_output.text)
+
+            await asyncio.sleep(0.5)
+
+    except FileNotFoundError:
+        raw_output.text += f"Error: {filename} not found.\n"
+        decoded_output.text += f"Error: {filename} not found.\n"
+    except Exception as e:
+        raw_output.text += f"Error sending binary file: {e}\n"
+        decoded_output.text += f"Error sending binary file: {e}\n"
 
 # -------- Main --------
 async def main():
