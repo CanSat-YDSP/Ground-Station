@@ -24,7 +24,7 @@ class SerialReader:
                 return None
             if header != b'\xFF':
                 return None
-
+            
             # read length byte
             length_byte = self.ser.read(1)
             if not length_byte:
@@ -47,6 +47,15 @@ class SerialReader:
 
             if self.calculate_xor_checksum(payload) == recv_checksum:
                 return payload
+
+            # checksum mismatch
+            raw_output.text += "Checksum mismatch\n"
+            decoded_output.text += "Checksum mismatch\n"
+
+            # compare checksums
+            raw_output.text += f"Calculated checksum: {self.calculate_xor_checksum(payload):02X}, Received checksum: {recv_checksum:02X}\n"
+            decoded_output.text += f"Calculated checksum: {self.calculate_xor_checksum(payload):02X}, Received checksum: {recv_checksum:02X}\n"
+
         return None
 
     def write_line(self, data: bytes):
@@ -133,6 +142,11 @@ def _(event):
             gs.write_line(b'\x04')
             raw_output.text += "Sent calibrate altitude command\n"
             decoded_output.text += "Sent calibrate altitude command\n"
+        
+        elif parts[0] == "reset":
+            gs.write_line(b'\x46')
+            raw_output.text += "Sent reset command\n"
+            decoded_output.text += "Sent reset command\n"
 
         elif parts[0] == "send-sim":
             async def send_simulation():
@@ -222,6 +236,11 @@ def _(event):
             raw_output.text += msg + "\n"
             decoded_output.text += msg + "\n"
 
+        elif parts[0] == "servo":
+            gs.write_line(b'\x07')
+            raw_output.text += "Sent servo command\n"
+            decoded_output.text += "Sent servo command\n"
+
         elif parts[0] == "exit":
             raw_output.text += "Exiting application...\n"
             decoded_output.text += "Exiting application...\n"
@@ -252,14 +271,15 @@ layout = Layout(
 
 modes = ["MODE_SIMULATION", "MODE_FLIGHT"]
 states = ["LAUNCH_PAD", "ASCENT", "DESCENT", "PROBE_RELEASE", "LANDED"]
-upload_statuses = ["NONE", "UPLOADING", "SUCCESS", "FAILURE"]
+upload_statuses = ["NONE", "READY", "UPLOADING", "SUCCESS", "FAILURE"]
 command_codes = {
     0x01: "LAUNCH",
     0x02: "SET_PRESSURE",
     0x03: "ENTER_SIMULATION",
     0x04: "CALIBRATE_ALTITUDE",
-    0x05: "BINARY_DATA_PACKET",
-    0x06: "BINARY_DATA_END"
+    0x05: "BINARY_DATA_START",
+    0x06: "BINARY_DATA_PACKET",
+    0x07: "BINARY_DATA_END",
 }
 
 def decode_line(line: bytes) -> str:
@@ -268,7 +288,8 @@ def decode_line(line: bytes) -> str:
     state = states[line[2]]
     command_code = line[51]
     command = command_codes.get(command_code, "UNKNOWN_COMMAND")
-    upload_status = line[52]
+    app_checksum = line[52]
+    upload_status = line[53]
     try:
         altitude = struct.unpack('<f', line[3:7])[0]
         pressure = struct.unpack('<f', line[7:11])[0]
@@ -310,6 +331,7 @@ def decode_line(line: bytes) -> str:
         f"\nMagnetometer: X={mag_x:.2f} µT, Y={mag_y:.2f} µT, Z={mag_z:.2f} µT"
         f"\nGyroscope: X={gyro_x:.2f} °/s, Y={gyro_y:.2f} °/s, Z={gyro_z:.2f} °/s"
         f"\nCommand Echo: {command_code} ({command})"
+        f"\nApp Checksum: {app_checksum}"
         f"\nUpload Status: {upload_statuses[upload_status]}"
     )
     return decoded
@@ -349,11 +371,15 @@ async def send_binary_file(filename="binary.bin"):
 
         # Send each chunk
         for i, chunk in enumerate(chunks):
-            packet_command = b'\x05'  # default command for all but last
+            # first packet is command 0x05, followed by 0x06 for the rest, and 0x07 for the last
+
+            packet_command = b'\x06'  # default command for all but last
             # If it's the last chunk, append checksum and change command
             if i == len(chunks) - 1:
-                packet_command = b'\x06'
+                packet_command = b'\x07'
                 chunk = chunk + bytes([total_checksum])
+            if i == 0:
+                packet_command = b'\x05'
             
             gs.write_line(packet_command + chunk)
             raw_output.text += f"Sent packet {i + 1}/{len(chunks)} ({len(chunk)} bytes)\n"
@@ -361,7 +387,7 @@ async def send_binary_file(filename="binary.bin"):
             raw_output.buffer.cursor_position = len(raw_output.text)
             decoded_output.buffer.cursor_position = len(decoded_output.text)
 
-            await asyncio.sleep(0.5)
+            await asyncio.sleep(0.2)
 
     except FileNotFoundError:
         raw_output.text += f"Error: {filename} not found.\n"
