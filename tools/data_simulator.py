@@ -25,7 +25,7 @@ v = initial_velocity
 h = 500.0  # starting altitude in meters (because the CanSat is unlikely to start at exact ground level, is not falling when it launches)
 
 # Create CSV file
-with open("cansat_pressure_profile.csv", "w", newline="") as csvfile:
+with open("logs/cansat_pressure_profile.csv", "w", newline="") as csvfile:
     writer = csv.writer(csvfile)
     writer.writerow(["time_s", "pressure_Pa"])
 

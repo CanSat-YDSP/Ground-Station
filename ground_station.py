@@ -153,7 +153,7 @@ def _(event):
         elif parts[0] == "send-sim":
             async def send_simulation():
                 try:
-                    with open("cansat_pressure_profile.csv", "r") as f:
+                    with open("logs/cansat_pressure_profile.csv", "r") as f:
                         next(f)  # skip header
                         for line in f:
                             if not line.strip():
@@ -178,7 +178,7 @@ def _(event):
             decoded_output.text += "Started simulated pressure transmission...\n"
 
         elif parts[0] == "save-log":
-            filename = parts[1] if len(parts) > 1 else "serial_log.csv"
+            filename = parts[1] if len(parts) > 1 else "logs/serial_log.csv"
             try:
                 with open(filename, "w", newline="") as f:
                     f.write("timestamp,data_hex\n")
@@ -196,7 +196,7 @@ def _(event):
                 decoded_output.text += f"Error saving log: {e}\n"
 
         elif parts[0] == "save-altitude-log":
-            filename = parts[1] if len(parts) > 1 else "altitude_log.csv"
+            filename = parts[1] if len(parts) > 1 else "logs/altitude_log.csv"
             try:
                 with open(filename, "w", newline="") as f:
                     f.write("timestamp,altitude_m\n")
@@ -218,7 +218,7 @@ def _(event):
                 decoded_output.text += f"Error saving altitude log: {e}\n"
         
         elif parts[0] == "send-bin":
-            file_to_send = parts[1] if len(parts) > 1 else "binary.bin"
+            file_to_send = "binaries/" + parts[1] if len(parts) > 1 else "binaries/binary.bin"
             asyncio.create_task(send_binary_file(file_to_send))
             raw_output.text += f"Started sending binary file {file_to_send}...\n"
             decoded_output.text += f"Started sending binary file {file_to_send}...\n"
@@ -383,7 +383,7 @@ async def refresh():
                 decoded_output.buffer.cursor_position = len(decoded_output.text)
         await asyncio.sleep(0.05)
 
-async def send_binary_file(filename="binary.bin"):
+async def send_binary_file(filename="binaries/binary.bin"):
     try:
         # Read entire binary file
         with open(filename, "rb") as f:
