@@ -48,13 +48,13 @@ class SerialReader:
             if self.calculate_xor_checksum(payload) == recv_checksum:
                 return payload
 
-            # checksum mismatch
-            raw_output.text += "Checksum mismatch\n"
-            decoded_output.text += "Checksum mismatch\n"
+            # # checksum mismatch
+            # raw_output.text += "Checksum mismatch\n"
+            # decoded_output.text += "Checksum mismatch\n"
 
-            # compare checksums
-            raw_output.text += f"Calculated checksum: {self.calculate_xor_checksum(payload):02X}, Received checksum: {recv_checksum:02X}\n"
-            decoded_output.text += f"Calculated checksum: {self.calculate_xor_checksum(payload):02X}, Received checksum: {recv_checksum:02X}\n"
+            # # compare checksums
+            # raw_output.text += f"Calculated checksum: {self.calculate_xor_checksum(payload):02X}, Received checksum: {recv_checksum:02X}\n"
+            # decoded_output.text += f"Calculated checksum: {self.calculate_xor_checksum(payload):02X}, Received checksum: {recv_checksum:02X}\n"
 
         return None
 
@@ -62,6 +62,8 @@ class SerialReader:
         # Write a framed packet to the serial port, with xFF header, length, data then checksum
         self.ser.write(b'\xFF')
         no_bytes = len(data)
+        raw_output.text += f"Writing {no_bytes} bytes\n"
+        decoded_output.text += f"Writing {no_bytes} bytes\n"
         self.ser.write(bytes([no_bytes]))
         self.ser.write(data)
         self.ser.write(bytes([self.calculate_xor_checksum(data)]))
@@ -138,13 +140,13 @@ def _(event):
             raw_output.text += "Entered simulation mode\n"
             decoded_output.text += "Entered simulation mode\n"
 
-        elif parts[0] == "calibrate_altitude":
+        elif parts[0] == "calibrate-altitude":
             gs.write_line(b'\x04')
             raw_output.text += "Sent calibrate altitude command\n"
             decoded_output.text += "Sent calibrate altitude command\n"
         
         elif parts[0] == "reset":
-            gs.write_line(b'\x46')
+            gs.write_line(b'\x00')
             raw_output.text += "Sent reset command\n"
             decoded_output.text += "Sent reset command\n"
 
@@ -182,7 +184,9 @@ def _(event):
                     f.write("timestamp,data_hex\n")
                     for line in raw_output.text.strip().split("\n"):
                         if line.strip():
-                            f.write(f"{datetime.now().isoformat()},{line}\n")
+                            # timestamp is packet count, convert hex to dec
+                            timestamp = line.split()[0]
+                            f.write(f"{int(timestamp, 16)},{line}\n")
                 raw_output.text += f"Saved log to {filename}\n"
                 decoded_output.text += f"Saved log to {filename}\n"
                 raw_output.buffer.cursor_position = len(raw_output.text)
@@ -199,7 +203,8 @@ def _(event):
                     for entry in decoded_output.text.strip().split("\n\n"):
                         if "Altitude:" in entry:
                             lines = entry.split("\n")
-                            timestamp = datetime.now().isoformat()
+                            # timestamp is the packet count (take first token after the colon)
+                            timestamp = lines[0].split(":", 1)[1].strip().split()[0]
                             for line in lines:
                                 if line.startswith("Altitude:"):
                                     altitude_str = line.split(":")[1].strip().split()[0]
@@ -223,23 +228,46 @@ def _(event):
         elif parts[0] == "help":
             msg = (
                 "Available commands:\n"
-                " launch           - start launch\n"
-                " enter-sim        - enter simulation mode\n"
-                " send-sim         - send simulated pressure data\n"
-                " calibrate_altitude - calibrate altitude sensor\n"
-                " pressure <value> - send pressure float\n"
-                " save-log [file]  - save current raw output to CSV\n"
-                " save-altitude-log [file] - save altitude data to CSV\n"
-                " help             - show this message\n"
-                " exit             - quit\n"
+                "launch - Send launch command\n" \
+                "pressure <value> - Set pressure value\n" \
+                "enter-sim - Enter simulation mode\n" \
+                "calibrate-altitude - Calibrate altitude\n" \
+                "reset - Reset the system\n" \
+                "send-sim - Start sending simulated pressure data\n" \
+                "save-log [filename] - Save raw hex log to CSV\n" \
+                "save-altitude-log [filename] - Save altitude log to CSV\n" \
+                "send-bin [filename] - Send binary file to CanSat\n" \
+                "servo - Send servo command\n" \
+                "AT <args> - Send AT command\n" \
+                "startup-ack - Send startup acknowledgment\n" \
+                "exit - Exit the application\n"
             )
             raw_output.text += msg + "\n"
             decoded_output.text += msg + "\n"
 
         elif parts[0] == "servo":
-            gs.write_line(b'\x07')
+            gs.write_line(b'\x08')
             raw_output.text += "Sent servo command\n"
             decoded_output.text += "Sent servo command\n"
+
+        elif parts[0] == "AT":
+            at_args = ' '.join(parts[1:]).strip()  # remove extra spaces
+            if at_args:
+                at_payload = ('AT ' + at_args).encode('ascii')  # force ASCII
+            else:
+                at_payload = b'AT'
+            packet = b'\x09' + at_payload
+            gs.write_line(packet)
+
+            # Logs
+            readable = at_payload.decode('ascii')
+            raw_output.text += f"Sent AT command: {readable}\n"
+            decoded_output.text += f"Sent AT command: {readable}\n"
+
+        elif parts[0] == "startup-ack":
+            gs.write_line(b'\x0A')
+            raw_output.text += "Sent startup acknowledgment\n"
+            decoded_output.text += "Sent startup acknowledgment\n"
 
         elif parts[0] == "exit":
             raw_output.text += "Exiting application...\n"
@@ -273,6 +301,7 @@ modes = ["MODE_SIMULATION", "MODE_FLIGHT"]
 states = ["LAUNCH_PAD", "ASCENT", "DESCENT", "PROBE_RELEASE", "LANDED"]
 upload_statuses = ["NONE", "READY", "UPLOADING", "SUCCESS", "FAILURE"]
 command_codes = {
+    0x00: "RESET",
     0x01: "LAUNCH",
     0x02: "SET_PRESSURE",
     0x03: "ENTER_SIMULATION",
@@ -280,6 +309,9 @@ command_codes = {
     0x05: "BINARY_DATA_START",
     0x06: "BINARY_DATA_PACKET",
     0x07: "BINARY_DATA_END",
+    0x08: "SERVO",
+    0x09: "AT",
+    0x0A: "STARTUP_ACK"
 }
 
 def decode_line(line: bytes) -> str:
