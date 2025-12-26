@@ -48,11 +48,11 @@ class SerialReader:
             if self.calculate_xor_checksum(payload) == recv_checksum:
                 return payload
 
-            # # checksum mismatch
+            # checksum mismatch
             # raw_output.text += "Checksum mismatch\n"
             # decoded_output.text += "Checksum mismatch\n"
 
-            # # compare checksums
+            # compare checksums
             # raw_output.text += f"Calculated checksum: {self.calculate_xor_checksum(payload):02X}, Received checksum: {recv_checksum:02X}\n"
             # decoded_output.text += f"Calculated checksum: {self.calculate_xor_checksum(payload):02X}, Received checksum: {recv_checksum:02X}\n"
 
@@ -316,28 +316,29 @@ command_codes = {
 
 def decode_line(line: bytes) -> str:
     packet_count = line[0]
-    mode = modes[line[1]]
-    state = states[line[2]]
-    command_code = line[51]
+    version = line[1]
+    mode = modes[line[2]]
+    state = states[line[3]]
+    command_code = line[52]
     command = command_codes.get(command_code, "UNKNOWN_COMMAND")
-    app_checksum = line[52]
-    upload_status = line[53]
+    app_checksum = line[53]
+    upload_status = line[54]
     try:
-        altitude = struct.unpack('<f', line[3:7])[0]
-        pressure = struct.unpack('<f', line[7:11])[0]
-        temperature = struct.unpack('<f', line[11:15])[0]
+        altitude = struct.unpack('<f', line[4:8])[0]
+        pressure = struct.unpack('<f', line[8:12])[0]
+        temperature = struct.unpack('<f', line[12:16])[0]
         # accel x y and z
-        accel_x = struct.unpack('<f', line[15:19])[0]
-        accel_y = struct.unpack('<f', line[19:23])[0]
-        accel_z = struct.unpack('<f', line[23:27])[0]
+        accel_x = struct.unpack('<f', line[16:20])[0]
+        accel_y = struct.unpack('<f', line[20:24])[0]
+        accel_z = struct.unpack('<f', line[24:28])[0]
         # mag x y and z
-        mag_x = struct.unpack('<f', line[27:31])[0]
-        mag_y = struct.unpack('<f', line[31:35])[0]
-        mag_z = struct.unpack('<f', line[35:39])[0]
+        mag_x = struct.unpack('<f', line[28:32])[0]
+        mag_y = struct.unpack('<f', line[32:36])[0]
+        mag_z = struct.unpack('<f', line[36:40])[0]
         # gyro x y and z
-        gyro_x = struct.unpack('<f', line[39:43])[0]
-        gyro_y = struct.unpack('<f', line[43:47])[0]
-        gyro_z = struct.unpack('<f', line[47:51])[0]
+        gyro_x = struct.unpack('<f', line[40:44])[0]
+        gyro_y = struct.unpack('<f', line[44:48])[0]
+        gyro_z = struct.unpack('<f', line[48:52])[0]
 
     except struct.error:
         altitude = 0.0
@@ -354,6 +355,7 @@ def decode_line(line: bytes) -> str:
         gyro_z = 0.0
     decoded = (
         f"Packet Count: {packet_count} --------------------\n"
+        f'Software Version: {version}\n'
         f"Mode: {mode}\n"
         f"State: {state}\n"
         f"Altitude: {altitude:.2f} m\n"
